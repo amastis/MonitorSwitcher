@@ -1,145 +1,96 @@
-#https://stackoverflow.com/questions/281133/how-to-control-the-mouse-in-mac-using-python
 import os
-from pathlib import Path
 import json
-from typing import Tuple, Dict, Callable
+from typing import Callable, List, Dict, Any
 
-# requirements files
-from pynput.mouse import Button, Controller
+import rumps
 import mss
-from quickmachotkey import quickHotKey, mask
-from quickmachotkey.configurators.jsonfile import JSONFileConfigurator
-from quickmachotkey.constants import cmdKey, controlKey, optionKey, kVK_ANSI_X, kVK_ANSI_C, kVK_ANSI_B, kVK_ANSI_K, kVK_ANSI_L
-
-# RUNNING THE APP CONSTANTLY
-from AppKit import NSApplication
-from PyObjCTools import AppHelper
+# LOCAL FILES
+import commands
+import generate_image
 
 
-class MonitorSwitcher(object):
-    """handling the creation of shortcuts for monitors to move the cursor from monitor to monitor"""
+def _open_json(file_name: str) -> Dict[str, Any]:
+    with open(file_name, 'r') as file:
+        return json.load(file)
+
+def _save_json(file_name: str, new_dict: Dict[str, Any]) -> None:
+    with open(file_name, 'w') as file:
+        json.dump(new_dict, file)
+
+def _get_monitor_values(monitor_num: str) -> Dict[str, int]:
+    with mss.mss() as sct:
+        return sct.monitors[int(monitor_num)]
+
+def save_monitor_command(monitor_num: int, command: str) -> None:
+    original_commands: Dict[str, Any] = {}
+    commands_update: Dict[str, Any] = {}
+    if 'monitorKey.json' in os.listdir():
+        # check if there is an original command to replace
+        original_commands = _open_json('monitorKey.json')
+        if original_commands.get(monitor_num): # update monitor commands + commands json lookups
+            original_command: str = original_commands[monitor_num]
+            commands_update = _open_json('commands.json')
+            del commands_update[original_command]
+
+    # update the values in the dicts to save to json
+    original_commands[monitor_num] = command
+    commands_update[command] = _get_monitor_values(monitor_num)
+
+    _save_json('commands.json', commands_update)
+    _save_json('monitorKey.json', original_commands)
+
+class MonitorSwitcher(rumps.App):
     def __init__(self):
-        self.monitor_command_file: str = 'monitors.json'
-
-
-    def _first_run_check(self) -> bool:
-        return self.monitor_command_file in os.listdir()
-
-
-    def _convert_key_to_virtualKey(self, key) -> int:
-        # because the keys are stored in self.monitor_command_file as the actual command values instead of the key values -- need a func to convert from the command values to key values
-        key_codes: Dict[str, int] = {
-            'A': int(0x0),
-            'B': int(0xB),
-            'C': int(0x8),
-            'D': int(0x2),
-            'E': int(0xE),
-            'F': int(0x3),
-            'G': int(0x5),
-            'H': int(0x4),
-            'I': int(0x22),
-            'J': int(0x26),
-            'K': int(0x28),
-            'L': int(0x25),
-            'M': int(0x2E),
-            'N': int(0x2D),
-            'O': int(0x1F),
-            'P': int(0x23),
-            'Q': int(0xC),
-            'R': int(0xF),
-            'S': int(0x1),
-            'T': int(0x11),
-            'U': int(0x20),
-            'V': int(0x9),
-            'W': int(0xD),
-            'X': int(0x7),
-            'Y': int(0x10),
-            'Z': int(0x6),
-        }
-        return key_codes.get(key)
-
-
-    def _get_command_file(self) -> Dict[str, Dict[str, int]]:
-        with open(self.monitor_command_file, 'r') as file:
-            monitor_commands = json.load(file)
-        return monitor_commands
-
-
-    def create_monitors(self) -> None:
-        if not self._first_run_check():
-            return # TODO get user input on what commands should be for each monitor
-
-        monitor_commands = self._get_command_file()
-
-        # TODO -- if user changes values -- how is this impacted? / How to destroy current versions and recreate new ones in their place...
-        for item in monitor_commands.keys():
-            self._create_monitor(item[-1]) # TODO currently only the final key is what is changing
-
-
-    def _get_monitor_index(self, command_used: str) -> int:
-        # TODO how to setup this monitors.json file on initial run through...
-        monitor_values = self._get_command_file()[command_used]
-
-        # from all monitors find the correct monitor based on location (may change during use)
+        self.app = rumps.App("Monitor Switcher") # TODO update icon
+        self.monitor_image_name: str = generate_image.main()
+        print(self.monitor_image_name)
         with mss.mss() as sct:
-            for index, item in enumerate(sct.monitors[1:]):
-                if monitor_values['left'] == item['left'] and monitor_values['top'] == item['top']:
-                    return index + 1
+            self.monitors_num: int = len(sct.monitors) - 1
+
+        if self.monitors_num == 0:
+            print('please connect to a monitor')
+
+        self.app.menu = self.monitors_layout_image()
+        self.create_monitor_inputs()
+        commands.main()
 
 
-    # https://github.com/moses-palmer/pynput/issues/350
-    # get the parameters of the displays
-    def _get_monitor_midpoint(self, monitor: int) -> Tuple[int, int]:
+    '''
+    @rumps.timer(10)
+    def check_monitors() -> bool:
         with mss.mss() as sct:
-            monitor_values: Dict[str, int] = sct.monitors[monitor]
+            monitors_num: int = len(sct.monitors) - 1
 
-        horizontal_mid: int = monitor_values['left'] + int(monitor_values['width'] / 2)
-        veritcal_mid: int = monitor_values['top'] + int(monitor_values['height'] / 2)
+        return self.monitors_num != monitors_num
+    '''
 
-        return horizontal_mid, veritcal_mid
+    def monitors_layout_image(self) -> List[rumps.MenuItem]:
+        art_menu = []
+        art_path = self.monitor_image_name
+        if art_path and os.path.isfile(art_path):
+            art_menu = [rumps.MenuItem("", callback=None, icon=art_path, dimensions=[192, 192]), None]
 
-
-    def _click_monitor(self, monitor_number: int) -> None:
-        mouse = Controller()
-        mouse.position = self._get_monitor_midpoint(monitor_number)
-        mouse.click(Button.left, 1)
-
-
-    # create a monitor based on the command files stored
-    def _create_monitor(self, key) -> Callable:
-        key_code = self._convert_key_to_virtualKey(key) # TODO currently only the final key is what is changing
-        @quickHotKey(virtualKey=key_code, modifierMask=mask(cmdKey, optionKey))
-        def monitor() -> None:
-            print(f"handled ⌘⌥{key}")
-            self._click_monitor(self._get_monitor_index(f"⌘⌃⌥{key}"))
-
-        return monitor
+        return art_menu
 
 
-'''
-# https://stackoverflow.com/a/75869640/7451892
-config = JSONFileConfigurator(Path("whatkey.json")) # for updating the value of the virtualkey
-@quickHotKey(virtualKey=kVK_ANSI_X, modifierMask=mask(cmdKey, controlKey, optionKey), configurator=config)
-def application() -> None:
-    print("handled ⌘⌃⌥X")
-    print("handled, switching to K")
-    application.configure(virtualKey=kVK_ANSI_K, modifierMask=mask(cmdKey, controlKey, optionKey))
-'''
+    def _monitor_prefs(self, monitor_num: int) -> Callable:
+        @rumps.clicked(f'Monitor: {monitor_num}')
+        def prefs(self):
+            label: str = f'Monitor: {monitor_num}'
+            response = rumps.Window(message='Insert Command for Monitor Hot Key', title=f"{label} Hot Key", default_text='defaulted', ok='Save').run()
+            save_monitor_command(monitor_num, response.text)
+            print(label, response.text)
+        return prefs
+
+    # create correct number of functions to get input for monitors
+    def create_monitor_inputs(self) -> None:
+        for i in range(self.monitors_num):
+            self._monitor_prefs(i + 1)
+    
+
+    def run(self):
+        self.app.run()
 
 
-def main():
-    monitor_obj = MonitorSwitcher()
-    monitor_obj.create_monitors()
-
-    NSApplication.sharedApplication()
-    AppHelper.runEventLoop()    
-
-
-if __name__ == '__main__':
-    main()
-
-''' TODO LIST
-- add detector to add multiple monitor configurators
-- how to have configurator using same file --> but with different values
-- adding menu bar icon + spots to insert values for configurator
-'''
+if __name__ == "__main__":
+    MonitorSwitcher().run()
